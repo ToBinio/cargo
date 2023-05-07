@@ -2,20 +2,23 @@
 #![allow(clippy::all)]
 #![warn(clippy::disallowed_methods)]
 
-use cargo::util::toml::StringOrVec;
-use cargo::util::CliError;
-use cargo::util::{self, closest_msg, command_prelude, CargoResult, CliResult, Config};
-use cargo_util::{ProcessBuilder, ProcessError};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-mod cli;
-mod commands;
+use lazy_static::lazy_static;
+
+use cargo::util::toml::StringOrVec;
+use cargo::util::CliError;
+use cargo::util::{self, closest_msg, command_prelude, CargoResult, CliResult, Config};
+use cargo_util::{ProcessBuilder, ProcessError};
 
 use crate::command_prelude::*;
+
+mod cli;
+mod commands;
 
 fn main() {
     #[cfg(feature = "pretty-env-logger")]
@@ -38,21 +41,26 @@ fn main() {
     }
 }
 
-/// Table for defining the aliases which come builtin in `Cargo`.
-/// The contents are structured as: `(alias, aliased_command, description)`.
-const BUILTIN_ALIASES: [(&str, &str, &str); 6] = [
-    ("b", "build", "alias: build"),
-    ("c", "check", "alias: check"),
-    ("d", "doc", "alias: doc"),
-    ("r", "run", "alias: run"),
-    ("t", "test", "alias: test"),
-    ("rm", "remove", "alias: remove"),
-];
 
-/// Function which contains the list of all of the builtin aliases and it's
-/// corresponding execs represented as &str.
-fn builtin_aliases_execs(cmd: &str) -> Option<&(&str, &str, &str)> {
-    BUILTIN_ALIASES.iter().find(|alias| alias.0 == cmd)
+lazy_static! {
+    /// Table for defining the aliases which come builtin in `Cargo`.
+    /// The contents are BTreeMap as: `(cmd, aliase)`.
+    static ref BUILTIN_ALIASES: BTreeMap<&'static str, &'static str> = BTreeMap::from([
+        ("build", "b"),
+        ("check", "c"),
+        ("doc", "d"),
+        ("run", "r"),
+        ("test", "t"),
+        ("remove", "rm"),
+    ]);
+}
+
+/// Function which returns the aliase for a builtin cmd
+fn builtin_command_from_aliase(aliase_to_find: &str) -> Option<&str> {
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(_, aliase)| **aliase == aliase_to_find)
+        .map(|(command, _)| *command)
 }
 
 /// Resolve the aliased command from the [`Config`] with a given command string.
@@ -78,13 +86,41 @@ fn aliased_command(config: &Config, command: &str) -> CargoResult<Option<Vec<Str
     };
 
     let result = user_alias.or_else(|| {
-        builtin_aliases_execs(command).map(|command_str| vec![command_str.1.to_string()])
+        builtin_command_from_aliase(command).map(|command_str| vec![command_str.to_string()])
     });
     Ok(result)
 }
 
-/// List all runnable commands
-fn list_commands(config: &Config) -> BTreeMap<String, CommandInfo> {
+/// List all runnable build-in commands
+fn list_built_in_commands() -> BTreeMap<String, BuiltInCommandInfo> {
+    let mut commands = BTreeMap::new();
+
+    for cmd in commands::builtin() {
+        commands.insert(
+            cmd.get_name().to_string(),
+            BuiltInCommandInfo {
+                aliase: BUILTIN_ALIASES
+                    .get(cmd.get_name())
+                    .map(|cmd| cmd.to_string()),
+                about: cmd.get_about().map(|s| s.to_string()),
+            },
+        );
+    }
+
+    // `help` is special, so it needs to be inserted separately.
+    commands.insert(
+        "help".to_string(),
+        BuiltInCommandInfo {
+            aliase: None,
+            about: Some("Displays help for a cargo subcommand".to_string()),
+        },
+    );
+
+    commands
+}
+
+/// List all runnable commands with where installed with 'cargo install'
+fn list_installed_commands(config: &Config) -> BTreeMap<String, ExternalCommandInfo> {
     let prefix = "cargo-";
     let suffix = env::consts::EXE_SUFFIX;
     let mut commands = BTreeMap::new();
@@ -106,51 +142,30 @@ fn list_commands(config: &Config) -> BTreeMap<String, CommandInfo> {
                 let end = filename.len() - suffix.len();
                 commands.insert(
                     filename[prefix.len()..end].to_string(),
-                    CommandInfo::External { path: path.clone() },
+                    ExternalCommandInfo { path: path.clone() },
                 );
             }
         }
     }
 
-    for cmd in commands::builtin() {
-        commands.insert(
-            cmd.get_name().to_string(),
-            CommandInfo::BuiltIn {
-                about: cmd.get_about().map(|s| s.to_string()),
-            },
-        );
-    }
+    commands
+}
 
-    // Add the builtin_aliases and them descriptions to the
-    // `commands` `BTreeMap`.
-    for command in &BUILTIN_ALIASES {
-        commands.insert(
-            command.0.to_string(),
-            CommandInfo::BuiltIn {
-                about: Some(command.2.to_string()),
-            },
-        );
-    }
+/// List all user-defined aliases
+fn list_user_aliases(config: &Config) -> BTreeMap<String, AliasCommandInfo> {
+    let mut commands = BTreeMap::new();
 
     // Add the user-defined aliases
     if let Ok(aliases) = config.get::<BTreeMap<String, StringOrVec>>("alias") {
         for (name, target) in aliases.iter() {
             commands.insert(
                 name.to_string(),
-                CommandInfo::Alias {
+                AliasCommandInfo {
                     target: target.clone(),
                 },
             );
         }
     }
-
-    // `help` is special, so it needs to be inserted separately.
-    commands.insert(
-        "help".to_string(),
-        CommandInfo::BuiltIn {
-            about: Some("Displays help for a cargo subcommand".to_string()),
-        },
-    );
 
     commands
 }
@@ -176,8 +191,21 @@ fn execute_external_subcommand(config: &Config, cmd: &str, args: &[&OsStr]) -> C
                     cmd
                 )
             } else {
-                let suggestions = list_commands(config);
-                let did_you_mean = closest_msg(cmd, suggestions.keys(), |c| c);
+                let mut suggestions = vec![];
+
+                for command in list_built_in_commands() {
+                    suggestions.push(command.0);
+                }
+
+                for command in list_installed_commands(config) {
+                    suggestions.push(command.0);
+                }
+
+                for command in list_user_aliases(config) {
+                    suggestions.push(command.0);
+                }
+
+                let did_you_mean = closest_msg(cmd, suggestions.iter(), |c| &c);
 
                 anyhow::format_err!(
                     "no such command: `{}`{}\n\n\t\

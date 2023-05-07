@@ -10,9 +10,9 @@ use std::ffi::OsString;
 use std::fmt::Write;
 
 use super::commands;
-use super::list_commands;
 use crate::command_prelude::*;
 use cargo::core::features::HIDDEN;
+use crate::{list_built_in_commands, list_installed_commands, list_user_aliases};
 
 lazy_static::lazy_static! {
     // Maps from commonly known external commands (not builtin to cargo) to their
@@ -128,39 +128,51 @@ Run with 'cargo -Z [FLAG] [COMMAND]'",
     }
 
     if expanded_args.flag("list") {
-        drop_println!(config, "Installed Commands:");
-        for (name, command) in list_commands(config) {
+        drop_println!(config, "Built-in Commands:");
+        for (name, command) in list_built_in_commands() {
             let known_external_desc = KNOWN_EXTERNAL_COMMAND_DESCRIPTIONS.get(name.as_str());
-            match command {
-                CommandInfo::BuiltIn { about } => {
-                    assert!(
-                        known_external_desc.is_none(),
-                        "KNOWN_EXTERNAL_COMMANDS shouldn't contain builtin \"{}\"",
-                        name
-                    );
-                    let summary = about.unwrap_or_default();
-                    let summary = summary.lines().next().unwrap_or(&summary); // display only the first line
-                    drop_println!(config, "    {:<20} {}", name, summary);
-                }
-                CommandInfo::External { path } => {
-                    if let Some(desc) = known_external_desc {
-                        drop_println!(config, "    {:<20} {}", name, desc);
-                    } else if is_verbose {
-                        drop_println!(config, "    {:<20} {}", name, path.display());
-                    } else {
-                        drop_println!(config, "    {}", name);
-                    }
-                }
-                CommandInfo::Alias { target } => {
-                    drop_println!(
-                        config,
-                        "    {:<20} alias: {}",
-                        name,
-                        target.iter().join(" ")
-                    );
-                }
+
+            assert!(
+                known_external_desc.is_none(),
+                "KNOWN_EXTERNAL_COMMANDS shouldn't contain builtin \"{}\"",
+                name
+            );
+
+            let summary = command.about.unwrap_or_default();
+            let summary = summary.lines().next().unwrap_or(&summary); // display only the first line
+
+            let mut name = name;
+
+            if let Some(aliase) = command.aliase {
+                name += &format!(", {}", aliase);
+            }
+
+            drop_println!(config, "    {:<20} {}", name, summary);
+        }
+
+        drop_println!(config, "\nInstalled Commands:");
+        for (name, command) in list_installed_commands(config) {
+            let known_external_desc = KNOWN_EXTERNAL_COMMAND_DESCRIPTIONS.get(name.as_str());
+
+            if let Some(desc) = known_external_desc {
+                drop_println!(config, "    {:<20} {}", name, desc);
+            } else if is_verbose {
+                drop_println!(config, "    {:<20} {}", name, command.path.display());
+            } else {
+                drop_println!(config, "    {}", name);
             }
         }
+
+        drop_println!(config, "\nUser-defined Aliases:");
+        for (name, command) in list_user_aliases(config) {
+            drop_println!(
+                        config,
+                        "    {:<20} {}",
+                        name,
+                        command.target.iter().join(" ")
+                    );
+        }
+
         return Ok(());
     }
 
@@ -290,7 +302,7 @@ To pass the arguments to the subcommand, remove `--`",
                 // (binary of the form `cargo-<subcommand>`)
                 // Currently this is only a warning, but after a transition period this will become
                 // a hard error.
-                if super::builtin_aliases_execs(cmd).is_none() {
+                if super::builtin_command_from_aliase(cmd).is_none() {
                     if let Some(path) = super::find_external_subcommand(config, cmd) {
                         config.shell().warn(format!(
                         "\

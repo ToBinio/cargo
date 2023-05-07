@@ -1,3 +1,13 @@
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
+
+use anyhow::bail;
+pub use clap::Command;
+pub use clap::{value_parser, Arg, ArgAction, ArgMatches};
+
+use cargo_util::paths;
+
+pub use crate::core::compiler::CompileMode;
 use crate::core::compiler::{BuildConfig, MessageFormat, TimingOutput};
 use crate::core::resolver::CliFeatures;
 use crate::core::{Edition, Workspace};
@@ -12,16 +22,7 @@ use crate::util::{
     print_available_packages, print_available_tests,
 };
 use crate::CargoResult;
-use anyhow::bail;
-use cargo_util::paths;
-use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
-
-pub use crate::core::compiler::CompileMode;
 pub use crate::{CliError, CliResult, Config};
-pub use clap::{value_parser, Arg, ArgAction, ArgMatches};
-
-pub use clap::Command;
 
 pub trait CommandExt: Sized {
     fn _arg(self, arg: Arg) -> Self;
@@ -794,8 +795,17 @@ pub fn ignore_unknown<T: Default>(r: Result<T, clap::parser::MatchesError>) -> T
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub enum CommandInfo {
-    BuiltIn { about: Option<String> },
-    External { path: PathBuf },
-    Alias { target: StringOrVec },
+pub struct BuiltInCommandInfo {
+    pub aliase: Option<String>,
+    pub about: Option<String>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExternalCommandInfo {
+    pub path: PathBuf,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct AliasCommandInfo {
+    pub target: StringOrVec,
 }
