@@ -195,6 +195,10 @@ fn execute_external_subcommand(config: &Config, cmd: &str, args: &[&OsStr]) -> C
 
                 for command in list_built_in_commands() {
                     suggestions.push(command.0);
+
+                    if let Some(aliase) = command.1.aliase{
+                        suggestions.push(aliase);
+                    }
                 }
 
                 for command in list_installed_commands(config) {
